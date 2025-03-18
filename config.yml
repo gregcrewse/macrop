@@ -1,0 +1,65 @@
+# Configuration for Workday Email Processor
+# Save as workday_config.yml
+
+# Email settings
+email:
+  imap_server: "imap.gmail.com"  # Gmail IMAP server
+  username: "your_email@gmail.com"
+  password: "your_app_password"  # Use App Password for Gmail
+  # Search criteria to find Workday export emails
+  search_criteria: "UNSEEN SUBJECT \"SILL_CXO\""  # Adjust pattern as needed
+  mark_as_processed: true  # Mark emails as read after processing
+  processed_folder: "Processed"  # Move to this folder after processing
+
+# Google Sheets settings
+google_sheets:
+  credentials_file: "service-account-credentials.json"  # Path to your service account JSON file
+  loa_sheet_id: "your_loa_sheet_id_here"  # The ID from the Google Sheet URL
+  loa_sheet_name: "Sheet1"  # The name of the worksheet
+  to_sheet_id: "your_to_sheet_id_here"  # The ID from the Google Sheet URL
+  to_sheet_name: "Sheet1"  # The name of the worksheet
+
+# Column mapping if Workday export columns need to be renamed
+column_mapping:
+  loa:
+    # Example: "Workday Column Name": "Expected Column Name"
+    # "Employee": "Employee ID"
+    # "Leave Start": "First Day of Leave"
+  to:
+    # Example: "Workday Column Name": "Expected Column Name" 
+    # "Worker": "Employee ID"
+    # "Time Off": "Time Off Date"
+
+# Archive settings - Choose either local or google_drive method
+archive:
+  # Options: "local" or "google_drive"
+  method: "local"  
+  
+  # Settings for local archiving
+  local_path: "/path/to/archive/directory"  # Local directory path
+  
+  # Settings for Google Drive archiving
+  drive_folder_name: "Workday Risk Data Archive"  # Name of the folder in Google Drive
+  
+# Notification settings (optional)
+notifications:
+  enabled: false
+  email:
+    smtp_server: "smtp.gmail.com"
+    port: 587
+    use_tls: true
+    username: "your_email@gmail.com"
+    password: "your_app_password"
+    from_address: "your_email@gmail.com"
+    to_addresses:
+      - "recipient1@example.com"
+      - "recipient2@example.com"
+    subject_prefix: "[Workday Risk Data Pipeline]"
+
+# Processing settings
+processing:
+  add_timestamp_if_missing: true  # Add timestamp_unix to files that don't have it
+  # Date window for filtering records (in days)
+  date_window:
+    lookback: 60  # Process records from the last 60 days
+    forward: 30   # Process records up to 30 days in the future
