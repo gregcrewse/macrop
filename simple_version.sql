@@ -13,11 +13,11 @@ new_count AS (
 -- Find key values in old but not in new
 missing_in_new AS (
   SELECT {{ key_column }}, COUNT(*) as count
-  FROM {{ ref(old_model_name) }} old
+  FROM {{ ref(old_model_name) }} as source_model
   WHERE NOT EXISTS (
     SELECT 1 
-    FROM {{ ref(new_model_name) }} new
-    WHERE new.{{ key_column }} = old.{{ key_column }}
+    FROM {{ ref(new_model_name) }} as target_model
+    WHERE target_model.{{ key_column }} = source_model.{{ key_column }}
   )
   GROUP BY {{ key_column }}
 ),
@@ -25,11 +25,11 @@ missing_in_new AS (
 -- Find key values in new but not in old
 missing_in_old AS (
   SELECT {{ key_column }}, COUNT(*) as count
-  FROM {{ ref(new_model_name) }} new
+  FROM {{ ref(new_model_name) }} as target_model
   WHERE NOT EXISTS (
     SELECT 1 
-    FROM {{ ref(old_model_name) }} old
-    WHERE old.{{ key_column }} = new.{{ key_column }}
+    FROM {{ ref(old_model_name) }} as source_model
+    WHERE source_model.{{ key_column }} = target_model.{{ key_column }}
   )
   GROUP BY {{ key_column }}
 ),
