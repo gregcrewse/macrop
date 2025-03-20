@@ -1,0 +1,1731 @@
+-- 1. DATASET PROFILING MACRO
+{% macro profile_dataset(model_name, sample_size=10000) %}
+{#
+  This macro creates a comprehensive statistical profile of a dataset
+  Parameters:
+    - model_name: The model to profile
+    - sample_size: Sample size to use for profiling (default: 10000)
+#}
+
+{% set relation = ref(model_name) %}
+
+-- Get column information
+{% set columns_query %}
+  SELECT 
+    column_name,
+    data_type
+  FROM {{ information_schema_columns(relation) }}
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set columns = run_query(columns_query) %}
+
+-- Build queries for each data type
+{% set numeric_columns = [] %}
+{% set string_columns = [] %}
+{% set date_columns = [] %}
+{% set boolean_columns = [] %}
+
+{% for column in columns %}
+  {% set col_name = column['column_name'] %}
+  {% set data_type = column['data_type'] | lower %}
+  
+  {% if data_type in ('int', 'integer', 'bigint', 'smallint', 'numeric', 'decimal', 'float', 'double', 'real') %}
+    {% do numeric_columns.append(col_name) %}
+  {% elif data_type in ('varchar', 'char', 'text', 'string') %}
+    {% do string_columns.append(col_name) %}
+  {% elif data_type in ('date', 'datetime', 'timestamp', 'timestamp_ntz', 'timestamp_ltz', 'timestamp_tz') %}
+    {% do date_columns.append(col_name) %}
+  {% elif data_type in ('boolean', 'bool') %}
+    {% do boolean_columns.append(col_name) %}
+  {% endif %}
+{% endfor %}
+
+-- Get row count
+{% set count_query %}
+  SELECT COUNT(*) as row_count FROM {{ relation }}
+{% endset %}
+
+{% set row_count = run_query(count_query).columns[0][0] %}
+
+-- Calculate actual sample size
+{% set actual_sample = [sample_size, row_count] | min %}
+
+-- Create profile for numeric columns
+WITH sample_data AS (
+  SELECT * FROM {{ relation }}
+  {% if actual_sample < row_count %}
+  SAMPLE ({{ (actual_sample / row_count * 100) | round(2) }} PERCENT)
+  {% endif %}
+)
+
+-- Numeric column profiling
+{% if numeric_columns | length > 0 %}
+SELECT
+  'numeric' as data_type,
+  column_name,
+  metric,
+  metric_value
+FROM (
+  {% for column in numeric_columns %}
+  SELECT
+    '{{ column }}' as column_name,
+    'count' as metric,
+    COUNT({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_count' as metric,
+    (COUNT(*) - COUNT({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_pct' as metric,
+    ROUND((COUNT(*) - COUNT({{ column }})) * 100.0 / NULLIF(COUNT(*), 0), 2)::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'min' as metric,
+    MIN({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'max' as metric,
+    MAX({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'avg' as metric,
+    AVG({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'stddev' as metric,
+    STDDEV({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'p25' as metric,
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY {{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'p50' as metric,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'p75' as metric,
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY {{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'p95' as metric,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY {{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'distinct_values' as metric,
+    COUNT(DISTINCT {{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  {% if not loop.last %}UNION ALL{% endif %}
+  {% endfor %}
+)
+
+{% if string_columns | length > 0 %}
+UNION ALL
+
+-- String column profiling
+SELECT
+  'string' as data_type,
+  column_name,
+  metric,
+  metric_value
+FROM (
+  {% for column in string_columns %}
+  SELECT
+    '{{ column }}' as column_name,
+    'count' as metric,
+    COUNT({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_count' as metric,
+    (COUNT(*) - COUNT({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_pct' as metric,
+    ROUND((COUNT(*) - COUNT({{ column }})) * 100.0 / NULLIF(COUNT(*), 0), 2)::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'min_length' as metric,
+    MIN(LENGTH({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'max_length' as metric,
+    MAX(LENGTH({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'avg_length' as metric,
+    AVG(LENGTH({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'distinct_values' as metric,
+    COUNT(DISTINCT {{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'top_5_values' as metric,
+    LISTAGG(value || ' (' || count || ')', ', ') WITHIN GROUP (ORDER BY count DESC) as metric_value
+  FROM (
+    SELECT {{ column }} as value, COUNT(*) as count
+    FROM sample_data
+    WHERE {{ column }} IS NOT NULL
+    GROUP BY {{ column }}
+    ORDER BY count DESC
+    LIMIT 5
+  )
+  
+  {% if not loop.last %}UNION ALL{% endif %}
+  {% endfor %}
+)
+{% endif %}
+
+{% if date_columns | length > 0 %}
+UNION ALL
+
+-- Date column profiling
+SELECT
+  'date' as data_type,
+  column_name,
+  metric,
+  metric_value
+FROM (
+  {% for column in date_columns %}
+  SELECT
+    '{{ column }}' as column_name,
+    'count' as metric,
+    COUNT({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_count' as metric,
+    (COUNT(*) - COUNT({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_pct' as metric,
+    ROUND((COUNT(*) - COUNT({{ column }})) * 100.0 / NULLIF(COUNT(*), 0), 2)::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'min_date' as metric,
+    MIN({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'max_date' as metric,
+    MAX({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'date_range_days' as metric,
+    DATEDIFF('day', MIN({{ column }}), MAX({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'distinct_values' as metric,
+    COUNT(DISTINCT {{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  {% if not loop.last %}UNION ALL{% endif %}
+  {% endfor %}
+)
+{% endif %}
+
+{% if boolean_columns | length > 0 %}
+UNION ALL
+
+-- Boolean column profiling
+SELECT
+  'boolean' as data_type,
+  column_name,
+  metric,
+  metric_value
+FROM (
+  {% for column in boolean_columns %}
+  SELECT
+    '{{ column }}' as column_name,
+    'count' as metric,
+    COUNT({{ column }})::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_count' as metric,
+    (COUNT(*) - COUNT({{ column }}))::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'null_pct' as metric,
+    ROUND((COUNT(*) - COUNT({{ column }})) * 100.0 / NULLIF(COUNT(*), 0), 2)::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'true_count' as metric,
+    SUM(CASE WHEN {{ column }} = TRUE THEN 1 ELSE 0 END)::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'true_pct' as metric,
+    ROUND(SUM(CASE WHEN {{ column }} = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT({{ column }}), 0), 2)::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'false_count' as metric,
+    SUM(CASE WHEN {{ column }} = FALSE THEN 1 ELSE 0 END)::VARCHAR as metric_value
+  FROM sample_data
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'false_pct' as metric,
+    ROUND(SUM(CASE WHEN {{ column }} = FALSE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT({{ column }}), 0), 2)::VARCHAR as metric_value
+  FROM sample_data
+  
+  {% if not loop.last %}UNION ALL{% endif %}
+  {% endfor %}
+)
+{% endif %}
+
+ORDER BY data_type, column_name, metric
+
+{% endmacro %}
+
+
+-- 2. BRANCH COMPARISON MACRO
+{% macro compare_branches(model_name, main_schema='main_dbt', current_schema=target.schema) %}
+{#
+  This macro compares a model across two branches (main and current)
+  Parameters:
+    - model_name: The model to compare
+    - main_schema: Schema for the main branch (default: main_dbt)
+    - current_schema: Schema for current branch (default: target schema)
+#}
+
+{% set current_relation = adapter.get_relation(
+    database=target.database,
+    schema=current_schema,
+    identifier=model_name
+) %}
+
+{% set main_relation = adapter.get_relation(
+    database=target.database,
+    schema=main_schema,
+    identifier=model_name
+) %}
+
+-- Check if both relations exist
+{% if current_relation is not none and main_relation is not none %}
+
+-- Get columns from both relations
+{% set current_columns_query %}
+  SELECT column_name, data_type
+  FROM {{ information_schema_columns(current_relation) }}
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set main_columns_query %}
+  SELECT column_name, data_type
+  FROM {{ information_schema_columns(main_relation) }}
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set current_columns = run_query(current_columns_query) %}
+{% set main_columns = run_query(main_columns_query) %}
+
+-- Convert to dictionaries for easier comparison
+{% set current_cols = {} %}
+{% for col in current_columns %}
+  {% do current_cols.update({col['column_name']: col['data_type']}) %}
+{% endfor %}
+
+{% set main_cols = {} %}
+{% for col in main_columns %}
+  {% do main_cols.update({col['column_name']: col['data_type']}) %}
+{% endfor %}
+
+-- Compare schema differences
+{% set schema_diff = {'added': [], 'removed': [], 'type_changed': []} %}
+
+{% for col_name, data_type in current_cols.items() %}
+  {% if col_name not in main_cols %}
+    {% do schema_diff['added'].append(col_name) %}
+  {% elif data_type != main_cols[col_name] %}
+    {% do schema_diff['type_changed'].append({'name': col_name, 'main_type': main_cols[col_name], 'current_type': data_type}) %}
+  {% endif %}
+{% endfor %}
+
+{% for col_name, data_type in main_cols.items() %}
+  {% if col_name not in current_cols %}
+    {% do schema_diff['removed'].append(col_name) %}
+  {% endif %}
+{% endfor %}
+
+-- Get common columns for data comparison
+{% set common_columns = [] %}
+{% for col_name in current_cols.keys() %}
+  {% if col_name in main_cols and current_cols[col_name] == main_cols[col_name] %}
+    {% do common_columns.append(col_name) %}
+  {% endif %}
+{% endfor %}
+
+-- Get row counts for both relations
+{% set current_count_query %}
+  SELECT COUNT(*) FROM {{ current_relation }}
+{% endset %}
+
+{% set main_count_query %}
+  SELECT COUNT(*) FROM {{ main_relation }}
+{% endset %}
+
+{% set current_count = run_query(current_count_query).columns[0][0] %}
+{% set main_count = run_query(main_count_query).columns[0][0] %}
+
+-- Data comparison query for common columns
+WITH main_data AS (
+  SELECT
+    {% for col in common_columns %}
+    {{ col }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  FROM {{ main_relation }}
+),
+
+current_data AS (
+  SELECT
+    {% for col in common_columns %}
+    {{ col }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  FROM {{ current_relation }}
+),
+
+in_main_not_current AS (
+  SELECT 
+    {% for col in common_columns %}
+    {{ col }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  FROM main_data
+  EXCEPT
+  SELECT 
+    {% for col in common_columns %}
+    {{ col }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  FROM current_data
+),
+
+in_current_not_main AS (
+  SELECT 
+    {% for col in common_columns %}
+    {{ col }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  FROM current_data
+  EXCEPT
+  SELECT 
+    {% for col in common_columns %}
+    {{ col }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+  FROM main_data
+),
+
+summary AS (
+  SELECT
+    '{{ model_name }}' as model_name,
+    '{{ main_schema }}' as main_schema,
+    '{{ current_schema }}' as current_schema,
+    {{ main_count }} as main_row_count,
+    {{ current_count }} as current_row_count,
+    (SELECT COUNT(*) FROM in_main_not_current) as rows_in_main_not_current,
+    (SELECT COUNT(*) FROM in_current_not_main) as rows_in_current_not_main
+)
+
+SELECT * FROM summary
+
+{% else %}
+  {% if execute %}
+    {% if current_relation is none %}
+      {{ log('WARNING: ' ~ model_name ~ ' does not exist in current schema: ' ~ current_schema, info=True) }}
+    {% endif %}
+    {% if main_relation is none %}
+      {{ log('WARNING: ' ~ model_name ~ ' does not exist in main schema: ' ~ main_schema, info=True) }}
+    {% endif %}
+  {% endif %}
+
+  -- Return placeholder result if either relation does not exist
+  SELECT
+    '{{ model_name }}' as model_name,
+    '{{ main_schema }}' as main_schema,
+    '{{ current_schema }}' as current_schema,
+    {% if main_relation is none %}NULL{% else %}(SELECT COUNT(*) FROM {{ main_relation }}){% endif %} as main_row_count,
+    {% if current_relation is none %}NULL{% else %}(SELECT COUNT(*) FROM {{ current_relation }}){% endif %} as current_row_count,
+    NULL as rows_in_main_not_current,
+    NULL as rows_in_current_not_main
+{% endif %}
+
+{% endmacro %}
+
+
+-- 3. DOWNSTREAM IMPACT ANALYZER
+{% macro analyze_downstream_impact(model_name, max_depth=3) %}
+{#
+  This macro analyzes the impact of changes to a model on downstream models
+  Parameters:
+    - model_name: The model to analyze impact for
+    - max_depth: Maximum depth of downstream dependencies to analyze
+#}
+
+-- Get all downstream models
+{% set downstream_query %}
+  WITH RECURSIVE model_deps AS (
+    -- Base case: the starting model
+    SELECT 
+      n.unique_id,
+      n.name,
+      0 as depth
+    FROM {{ graph.nodes }} n
+    WHERE n.name = '{{ model_name }}'
+    
+    UNION ALL
+    
+    -- Recursive case: downstream dependencies
+    SELECT
+      d.unique_id,
+      d.name,
+      m.depth + 1 as depth
+    FROM model_deps m
+    JOIN {{ graph.edges }} e ON e.source_id = m.unique_id
+    JOIN {{ graph.nodes }} d ON d.unique_id = e.target_id
+    WHERE d.resource_type = 'model'
+      AND m.depth < {{ max_depth }}
+  )
+  
+  SELECT DISTINCT
+    name,
+    depth
+  FROM model_deps
+  WHERE depth > 0  -- Skip the starting model
+  ORDER BY depth, name
+{% endset %}
+
+{% set downstream_models = run_query(downstream_query) %}
+
+{% if execute %}
+  {{ log('Downstream impact analysis for model "' ~ model_name ~ '":', info=True) }}
+  
+  {% if downstream_models %}
+    {% set levels = {} %}
+    
+    -- Group models by depth level
+    {% for model in downstream_models %}
+      {% set model_name = model['name'] %}
+      {% set depth = model['depth'] %}
+      
+      {% if depth not in levels %}
+        {% do levels.update({depth: []}) %}
+      {% endif %}
+      
+      {% do levels[depth].append(model_name) %}
+    {% endfor %}
+    
+    -- Display models grouped by level
+    {% for level, models in levels.items() %}
+      {{ log('Level ' ~ level ~ ' (' ~ models|length ~ ' models):', info=True) }}
+      {% for model in models %}
+        {{ log('  - ' ~ model, info=True) }}
+      {% endfor %}
+    {% endfor %}
+    
+    {{ log('', info=True) }}
+    {{ log('Total downstream models affected: ' ~ downstream_models|length, info=True) }}
+  {% else %}
+    {{ log('No downstream models found.', info=True) }}
+  {% endif %}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 4. MODEL HEALTH METRICS
+{% macro model_health_metrics(model_name) %}
+{#
+  This macro calculates health metrics for a model
+  Parameters:
+    - model_name: The model to calculate health metrics for
+#}
+
+-- Get model information
+{% set model_info_query %}
+  SELECT *
+  FROM {{ graph.nodes }}
+  WHERE name = '{{ model_name }}'
+{% endset %}
+
+{% set model_info = run_query(model_info_query) %}
+
+-- Get model run stats (dbt_audit table must exist)
+{% set run_stats_query %}
+  SELECT 
+    MAX(created_at) as last_run,
+    AVG(execution_time) as avg_execution_time,
+    MAX(execution_time) as max_execution_time
+  FROM dbt_audit
+  WHERE model_name = '{{ model_name }}'
+    AND created_at >= DATEADD(day, -30, CURRENT_DATE())
+{% endset %}
+
+-- Get model relations
+{% set relations_query %}
+  WITH upstream AS (
+    SELECT COUNT(*) as count
+    FROM {{ graph.edges }} e
+    JOIN {{ graph.nodes }} n ON n.unique_id = e.source_id
+    WHERE e.target_id IN (
+      SELECT unique_id
+      FROM {{ graph.nodes }}
+      WHERE name = '{{ model_name }}'
+    )
+  ),
+  downstream AS (
+    SELECT COUNT(*) as count
+    FROM {{ graph.edges }} e
+    JOIN {{ graph.nodes }} n ON n.unique_id = e.target_id
+    WHERE e.source_id IN (
+      SELECT unique_id
+      FROM {{ graph.nodes }}
+      WHERE name = '{{ model_name }}'
+    )
+  )
+  
+  SELECT 
+    (SELECT count FROM upstream) as upstream_count,
+    (SELECT count FROM downstream) as downstream_count
+{% endset %}
+
+{% set relations = run_query(relations_query) %}
+
+-- Get row and column counts
+{% set stats_query %}
+  SELECT 
+    COUNT(*) as row_count,
+    {{ information_schema_columns(ref(model_name)) | length }} as column_count,
+    SUM(CASE WHEN column_name LIKE 'pk_%' OR column_name LIKE '%_id' THEN 1 ELSE 0 END) as key_column_count
+  FROM {{ ref(model_name) }}
+{% endset %}
+
+-- Check for test failures
+{% set test_failures_query %}
+  SELECT 
+    COUNT(*) as total_tests,
+    SUM(CASE WHEN status = 'fail' THEN 1 ELSE 0 END) as failed_tests
+  FROM dbt_test_results
+  WHERE model_name = '{{ model_name }}'
+    AND created_at >= DATEADD(day, -30, CURRENT_DATE())
+{% endset %}
+
+-- Return health metrics
+SELECT
+  '{{ model_name }}' as model_name,
+  {{ relations.columns[0][0] }} as upstream_dependencies,
+  {{ relations.columns[1][0] }} as downstream_dependencies,
+  {% try %}
+    (SELECT row_count FROM ({{ stats_query }})) as row_count,
+    (SELECT column_count FROM ({{ stats_query }})) as column_count,
+    (SELECT key_column_count FROM ({{ stats_query }})) as key_column_count,
+  {% endtry %}
+  {% try %}
+    (SELECT last_run FROM ({{ run_stats_query }})) as last_run,
+    (SELECT avg_execution_time FROM ({{ run_stats_query }})) as avg_execution_time,
+    (SELECT max_execution_time FROM ({{ run_stats_query }})) as max_execution_time,
+  {% endtry %}
+  {% try %}
+    (SELECT total_tests FROM ({{ test_failures_query }})) as total_tests,
+    (SELECT failed_tests FROM ({{ test_failures_query }})) as failed_tests,
+  {% endtry %}
+  CURRENT_TIMESTAMP() as report_generated_at
+
+{% endmacro %}
+
+
+-- 5. DATA DRIFT DETECTOR
+{% macro detect_data_drift(model_name, time_column, time_window='1 month', compare_window='1 month') %}
+{#
+  This macro detects data drift in a model over time
+  Parameters:
+    - model_name: The model to analyze
+    - time_column: The column containing timestamps
+    - time_window: The window for recent data (default: 1 month)
+    - compare_window: The window for comparison data (default: 1 month)
+#}
+
+{% set relation = ref(model_name) %}
+
+-- Get numerical columns
+{% set numeric_columns_query %}
+  SELECT column_name 
+  FROM {{ information_schema_columns(relation) }}
+  WHERE data_type IN ('integer', 'number', 'float', 'decimal', 'double', 'real', 'numeric')
+    AND column_name != '{{ time_column }}'
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set numeric_columns = run_query(numeric_columns_query).columns[0].values() %}
+
+-- Get categorical columns
+{% set categorical_columns_query %}
+  SELECT column_name 
+  FROM {{ information_schema_columns(relation) }}
+  WHERE data_type IN ('varchar', 'char', 'text', 'string')
+    AND column_name != '{{ time_column }}'
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set categorical_columns = run_query(categorical_columns_query).columns[0].values() %}
+
+-- Numerical drift analysis
+WITH recent_data AS (
+  SELECT *
+  FROM {{ relation }}
+  WHERE {{ time_column }} >= DATEADD({{ time_window }}, -1, CURRENT_DATE())
+),
+
+comparison_data AS (
+  SELECT *
+  FROM {{ relation }}
+  WHERE {{ time_column }} >= DATEADD({{ time_window }}, -1, DATEADD({{ compare_window }}, -1, CURRENT_DATE()))
+    AND {{ time_column }} < DATEADD({{ time_window }}, -1, CURRENT_DATE())
+),
+
+numeric_drift AS (
+  {% for column in numeric_columns %}
+  SELECT
+    '{{ column }}' as column_name,
+    'numeric' as data_type,
+    'avg' as metric,
+    ROUND(recent.avg_value, 2) as recent_value,
+    ROUND(comparison.avg_value, 2) as comparison_value,
+    ROUND(ABS(recent.avg_value - comparison.avg_value) / NULLIF(comparison.avg_value, 0) * 100, 2) as pct_change
+  FROM (
+    SELECT AVG({{ column }}) as avg_value
+    FROM recent_data
+  ) recent,
+  (
+    SELECT AVG({{ column }}) as avg_value
+    FROM comparison_data
+  ) comparison
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'numeric' as data_type,
+    'stddev' as metric,
+    ROUND(recent.stddev_value, 2) as recent_value,
+    ROUND(comparison.stddev_value, 2) as comparison_value,
+    ROUND(ABS(recent.stddev_value - comparison.stddev_value) / NULLIF(comparison.stddev_value, 0) * 100, 2) as pct_change
+  FROM (
+    SELECT STDDEV({{ column }}) as stddev_value
+    FROM recent_data
+  ) recent,
+  (
+    SELECT STDDEV({{ column }}) as stddev_value
+    FROM comparison_data
+  ) comparison
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'numeric' as data_type,
+    'null_rate' as metric,
+    ROUND(recent.null_rate * 100, 2) as recent_value,
+    ROUND(comparison.null_rate * 100, 2) as comparison_value,
+    ABS(recent.null_rate - comparison.null_rate) * 100 as pct_change
+  FROM (
+    SELECT (COUNT(*) - COUNT({{ column }})) / NULLIF(COUNT(*), 0) as null_rate
+    FROM recent_data
+  ) recent,
+  (
+    SELECT (COUNT(*) - COUNT({{ column }})) / NULLIF(COUNT(*), 0) as null_rate
+    FROM comparison_data
+  ) comparison
+  
+  {% if not loop.last %}UNION ALL{% endif %}
+  {% endfor %}
+),
+
+-- Categorical drift analysis
+categorical_drift AS (
+  {% for column in categorical_columns %}
+  SELECT
+    '{{ column }}' as column_name,
+    'categorical' as data_type,
+    'distinct_count' as metric,
+    recent.distinct_count as recent_value,
+    comparison.distinct_count as comparison_value,
+    ROUND(ABS(recent.distinct_count - comparison.distinct_count) / NULLIF(comparison.distinct_count, 0) * 100, 2) as pct_change
+  FROM (
+    SELECT COUNT(DISTINCT {{ column }}) as distinct_count
+    FROM recent_data
+  ) recent,
+  (
+    SELECT COUNT(DISTINCT {{ column }}) as distinct_count
+    FROM comparison_data
+  ) comparison
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'categorical' as data_type,
+    'null_rate' as metric,
+    ROUND(recent.null_rate * 100, 2) as recent_value,
+    ROUND(comparison.null_rate * 100, 2) as comparison_value,
+    ABS(recent.null_rate - comparison.null_rate) * 100 as pct_change
+  FROM (
+    SELECT (COUNT(*) - COUNT({{ column }})) / NULLIF(COUNT(*), 0) as null_rate
+    FROM recent_data
+  ) recent,
+  (
+    SELECT (COUNT(*) - COUNT({{ column }})) / NULLIF(COUNT(*), 0) as null_rate
+    FROM comparison_data
+  ) comparison
+  
+  UNION ALL
+  
+  SELECT
+    '{{ column }}' as column_name,
+    'categorical' as data_type,
+    'top_category_change' as metric,
+    recent.top_category as recent_value,
+    comparison.top_category as comparison_value,
+    CASE WHEN recent.top_category = comparison.top_category THEN 0 ELSE 1 END * 100 as pct_change
+  FROM (
+    SELECT {{ column }} as top_category
+    FROM recent_data
+    WHERE {{ column }} IS NOT NULL
+    GROUP BY {{ column }}
+    ORDER BY COUNT(*) DESC
+    LIMIT 1
+  ) recent,
+  (
+    SELECT {{ column }} as top_category
+    FROM comparison_data
+    WHERE {{ column }} IS NOT NULL
+    GROUP BY {{ column }}
+    ORDER BY COUNT(*) DESC
+    LIMIT 1
+  ) comparison
+  
+  {% if not loop.last %}UNION ALL{% endif %}
+  {% endfor %}
+),
+
+-- Combined results with significance flagging
+combined_results AS (
+  SELECT 
+    column_name,
+    data_type,
+    metric,
+    recent_value,
+    comparison_value,
+    pct_change,
+    CASE 
+      WHEN pct_change > 50 THEN 'High'
+      WHEN pct_change > 20 THEN 'Medium'
+      WHEN pct_change > 5 THEN 'Low'
+      ELSE 'Normal'
+    END as drift_severity
+  FROM (
+    SELECT * FROM numeric_drift
+    UNION ALL
+    SELECT * FROM categorical_drift
+  )
+)
+
+SELECT * FROM combined_results
+WHERE drift_severity != 'Normal'
+ORDER BY 
+  CASE 
+    WHEN drift_severity = 'High' THEN 1
+    WHEN drift_severity = 'Medium' THEN 2
+    WHEN drift_severity = 'Low' THEN 3
+    ELSE 4
+  END,
+  pct_change DESC
+
+{% endmacro %}
+
+
+-- 6. CROSS-DATABASE MODEL COMPARISON
+{% macro compare_cross_db(model_name, environments=['dev', 'test', 'prod'], key_columns=none) %}
+{#
+  This macro compares a model across multiple environments/databases
+  Parameters:
+    - model_name: The model to compare
+    - environments: List of environments to compare
+    - key_columns: Optional primary key columns for row-level comparison
+#}
+
+{% for env in environments %}
+  {% if not loop.first %}
+    {% set prev_env = environments[loop.index0 - 1] %}
+    
+    -- Get target relations for both environments
+    {% set relation_current = adapter.get_relation(
+        database=env_var(env ~ '_database', env),
+        schema=env_var(env ~ '_schema', env),
+        identifier=model_name
+    ) %}
+    
+    {% set relation_prev = adapter.get_relation(
+        database=env_var(prev_env ~ '_database', prev_env),
+        schema=env_var(prev_env ~ '_schema', prev_env),
+        identifier=model_name
+    ) %}
+    
+    -- Continue only if both relations exist
+    {% if relation_current is not none and relation_prev is not none %}
+    
+      -- If no key columns specified, get all columns for basic comparison
+      {% if key_columns is none %}
+        {% set columns_query %}
+          SELECT column_name
+          FROM {{ information_schema_columns(relation_current) }}
+          ORDER BY ordinal_position
+        {% endset %}
+        
+        {% set columns = run_query(columns_query).columns[0].values() %}
+      {% else %}
+        {% set columns = key_columns %}
+      {% endif %}
+      
+      -- Row count comparison
+      WITH {{ env }}_rows AS (
+        SELECT COUNT(*) as row_count FROM {{ relation_current }}
+      ),
+      
+      {{ prev_env }}_rows AS (
+        SELECT COUNT(*) as row_count FROM {{ relation_prev }}
+      ),
+      
+      row_diff AS (
+        SELECT
+          '{{ model_name }}' as model_name,
+          '{{ prev_env }}' as baseline_env,
+          '{{ env }}' as compare_env,
+          {{ prev_env }}_rows.row_count as baseline_rows,
+          {{ env }}_rows.row_count as compare_rows,
+          {{ env }}_rows.row_count - {{ prev_env }}_rows.row_count as absolute_diff,
+          ROUND(({{ env }}_rows.row_count - {{ prev_env }}_rows.row_count) * 100.0 / 
+            NULLIF({{ prev_env }}_rows.row_count, 0), 2) as percent_diff
+        FROM {{ prev_env }}_rows, {{ env }}_rows
+      )
+      
+      {% if key_columns is not none %}
+      ,
+      -- Row-level comparison if key columns specified
+      {{ prev_env }}_data AS (
+        SELECT 
+          {% for col in key_columns %}
+          {{ col }}{% if not loop.last %},{% endif %}
+          {% endfor %}
+        FROM {{ relation_prev }}
+      ),
+      
+      {{ env }}_data AS (
+        SELECT 
+          {% for col in key_columns %}
+          {{ col }}{% if not loop.last %},{% endif %}
+          {% endfor %}
+        FROM {{ relation_current }}
+      ),
+      
+      in_{{ prev_env }}_not_{{ env }} AS (
+        SELECT * FROM {{ prev_env }}_data
+        EXCEPT
+        SELECT * FROM {{ env }}_data
+      ),
+      
+      in_{{ env }}_not_{{ prev_env }} AS (
+        SELECT * FROM {{ env }}_data
+        EXCEPT
+        SELECT * FROM {{ prev_env }}_data
+      ),
+      
+      detailed_diff AS (
+        SELECT
+          '{{ model_name }}' as model_name,
+          '{{ prev_env }}' as baseline_env,
+          '{{ env }}' as compare_env,
+          (SELECT COUNT(*) FROM in_{{ prev_env }}_not_{{ env }}) as rows_in_baseline_not_compare,
+          (SELECT COUNT(*) FROM in_{{ env }}_not_{{ prev_env }}) as rows_in_compare_not_baseline
+      )
+      
+      SELECT * FROM row_diff
+      JOIN detailed_diff USING (model_name, baseline_env, compare_env)
+      {% else %}
+      
+      SELECT * FROM row_diff
+      {% endif %}
+      
+    {% else %}
+      {% if execute %}
+        {% if relation_current is none %}
+          {{ log('WARNING: ' ~ model_name ~ ' does not exist in ' ~ env, info=True) }}
+        {% endif %}
+        {% if relation_prev is none %}
+          {{ log('WARNING: ' ~ model_name ~ ' does not exist in ' ~ prev_env, info=True) }}
+        {% endif %}
+      {% endif %}
+      
+      -- Return placeholder result when relations don't exist
+      SELECT
+        '{{ model_name }}' as model_name,
+        '{{ prev_env }}' as baseline_env,
+        '{{ env }}' as compare_env,
+        {% if relation_prev is none %}NULL{% else %}(SELECT COUNT(*) FROM {{ relation_prev }}){% endif %} as baseline_rows,
+        {% if relation_current is none %}NULL{% else %}(SELECT COUNT(*) FROM {{ relation_current }}){% endif %} as compare_rows,
+        NULL as absolute_diff,
+        NULL as percent_diff
+        {% if key_columns is not none %}
+        , NULL as rows_in_baseline_not_compare,
+        NULL as rows_in_compare_not_baseline
+        {% endif %}
+    {% endif %}
+    
+    {% if not loop.last %}UNION ALL{% endif %}
+  {% endif %}
+{% endfor %}
+
+{% endmacro %}
+
+
+-- 7. HISTORICAL MODEL CHANGE TRACKER
+{% macro track_model_changes(model_name) %}
+{#
+  This macro tracks changes to a model over time for historical analysis
+  Parameters:
+    - model_name: The model to track changes for
+#}
+
+-- Create a snapshot of the current model state
+INSERT INTO {{ target.schema }}.model_history (
+  model_name,
+  snapshot_date,
+  row_count,
+  column_count,
+  hash_value
+)
+SELECT
+  '{{ model_name }}' as model_name,
+  CURRENT_DATE() as snapshot_date,
+  (SELECT COUNT(*) FROM {{ ref(model_name) }}) as row_count,
+  (
+    SELECT COUNT(*)
+    FROM {{ information_schema_columns(ref(model_name)) }}
+  ) as column_count,
+  -- Create a hash to detect changes in the model's content
+  -- This technique varies by database - here's a Snowflake example
+  MD5(
+    TO_JSON(
+      ARRAY_AGG(
+        column_name || ':' || data_type
+        ORDER BY ordinal_position
+      )
+    )
+  ) as hash_value
+FROM {{ information_schema_columns(ref(model_name)) }}
+
+{% endmacro %}
+
+
+-- 8. SEMANTIC VERSIONING FOR MODELS
+{% macro semantic_version_models(model_list=none) %}
+{#
+  This macro helps maintain semantic versioning for models
+  Parameters:
+    - model_list: Optional list of models to version (defaults to all)
+#}
+
+{% if model_list is none %}
+  {% set model_list_query %}
+    SELECT name
+    FROM {{ graph.nodes }}
+    WHERE resource_type = 'model'
+    ORDER BY name
+  {% endset %}
+  
+  {% set model_list = run_query(model_list_query).columns[0].values() %}
+{% endif %}
+
+{% if execute %}
+  {{ log('Model Semantic Versioning:', info=True) }}
+  {{ log('', info=True) }}
+  
+  {% for model_name in model_list %}
+    -- Get information about the model
+    {% set model_info_query %}
+      SELECT * 
+      FROM {{ graph.nodes }}
+      WHERE name = '{{ model_name }}'
+    {% endset %}
+    
+    {% set model_info = run_query(model_info_query) %}
+    
+    -- Get previous version from model_versions table
+    {% set prev_version_query %}
+      SELECT major, minor, patch
+      FROM {{ target.schema }}.model_versions
+      WHERE model_name = '{{ model_name }}'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    {% endset %}
+    
+    {% try %}
+      {% set prev_version = run_query(prev_version_query) %}
+      {% set has_prev_version = true %}
+    {% except %}
+      {% set has_prev_version = false %}
+    {% endtry %}
+    
+    -- Get schema changes since last version
+    {% if has_prev_version %}
+      {% set major = prev_version.columns[0][0] | int %}
+      {% set minor = prev_version.columns[1][0] | int %}
+      {% set patch = prev_version.columns[2][0] | int %}
+      
+      -- Get last schema snapshot
+      {% set prev_schema_query %}
+        SELECT column_definition
+        FROM {{ target.schema }}.model_schema_history
+        WHERE model_name = '{{ model_name }}'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      {% endset %}
+      
+      {% try %}
+        {% set prev_schema = run_query(prev_schema_query).columns[0][0] %}
+        
+        -- Get current schema
+        {% set current_schema_query %}
+          SELECT 
+            ARRAY_AGG(
+              column_name || ':' || data_type || ':' || 
+              CASE WHEN is_nullable = 'YES' THEN 'NULL' ELSE 'NOT NULL' END
+              ORDER BY ordinal_position
+            ) as column_definition
+          FROM {{ information_schema_columns(ref(model_name)) }}
+        {% endset %}
+        
+        {% set current_schema = run_query(current_schema_query).columns[0][0] %}
+        
+        -- Compare schemas to determine version change
+        {% if prev_schema != current_schema %}
+          -- Check breaking changes (column removal or type change)
+          {% set prev_columns = fromjson(prev_schema) %}
+          {% set current_columns_query %}
+            SELECT 
+              OBJECT_AGG(
+                column_name,
+                data_type || ':' || CASE WHEN is_nullable = 'YES' THEN 'NULL' ELSE 'NOT NULL' END
+              ) as column_map
+            FROM {{ information_schema_columns(ref(model_name)) }}
+          {% endset %}
+          
+          {% set current_columns = fromjson(run_query(current_columns_query).columns[0][0]) %}
+          
+          {% set has_breaking_change = false %}
+          {% set has_feature_change = false %}
+          
+          {% for prev_col in prev_columns %}
+            {% set col_parts = prev_col.split(':') %}
+            {% set col_name = col_parts[0] %}
+            {% set col_type = col_parts[1] %}
+            {% set col_null = col_parts[2] %}
+            
+            {% if col_name not in current_columns %}
+              -- Column was removed
+              {% set has_breaking_change = true %}
+            {% else %}
+              {% set current_def = current_columns[col_name] %}
+              {% set current_parts = current_def.split(':') %}
+              {% set current_type = current_parts[0] %}
+              {% set current_null = current_parts[1] %}
+              
+              {% if col_type != current_type %}
+                -- Column type changed
+                {% set has_breaking_change = true %}
+              {% elif col_null == 'NOT NULL' and current_null == 'NULL' %}
+                -- Column nullability relaxed - not breaking, but feature change
+                {% set has_feature_change = true %}
+              {% elif col_null == 'NULL' and current_null == 'NOT NULL' %}
+                -- Column constraint tightened - breaking change
+                {% set has_breaking_change = true %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          
+          -- Check for added columns
+          {% for col_name in current_columns %}
+            {% if col_name not in prev_columns %}
+              -- New column added - feature change
+              {% set has_feature_change = true %}
+            {% endif %}
+          {% endfor %}
+          
+          {% if has_breaking_change %}
+            -- Increment major version for breaking changes
+            {% set major = major + 1 %}
+            {% set minor = 0 %}
+            {% set patch = 0 %}
+          {% elif has_feature_change %}
+            -- Increment minor version for non-breaking changes
+            {% set minor = minor + 1 %}
+            {% set patch = 0 %}
+          {% else %}
+            -- Increment patch for bug fixes or internal changes
+            {% set patch = patch + 1 %}
+          {% endif %}
+        {% else %}
+          -- No schema changes, check for significant content changes
+          -- (This would need a custom implementation based on your criteria)
+          {% set patch = patch + 1 %}
+        {% endif %}
+      {% except %}
+        -- No previous schema, default to minor increment
+        {% set minor = minor + 1 %}
+      {% endtry %}
+    {% else %}
+      -- No previous version, start at 1.0.0
+      {% set major = 1 %}
+      {% set minor = 0 %}
+      {% set patch = 0 %}
+    {% endif %}
+    
+    {{ log('- ' ~ model_name ~ ': v' ~ major ~ '.' ~ minor ~ '.' ~ patch, info=True) }}
+    
+    -- Here you would typically save the version info to a table
+    -- INSERT INTO {{ target.schema }}.model_versions (
+    --   model_name,
+    --   major,
+    --   minor,
+    --   patch,
+    --   updated_at
+    -- ) VALUES (
+    --   '{{ model_name }}',
+    --   {{ major }},
+    --   {{ minor }},
+    --   {{ patch }},
+    --   CURRENT_TIMESTAMP()
+    -- )
+    
+    -- And save the current schema snapshot
+    -- INSERT INTO {{ target.schema }}.model_schema_history (
+    --   model_name,
+    --   column_definition,
+    --   updated_at
+    -- ) VALUES (
+    --   '{{ model_name }}',
+    --   (SELECT ARRAY_AGG(column_name || ':' || data_type || ':' || 
+    --      CASE WHEN is_nullable = 'YES' THEN 'NULL' ELSE 'NOT NULL' END
+    --      ORDER BY ordinal_position) as column_definition
+    --    FROM {{ information_schema_columns(ref(model_name)) }}),
+    --   CURRENT_TIMESTAMP()
+    -- )
+  {% endfor %}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 9. MIGRATION PLAN GENERATOR
+{% macro generate_migration_plan(old_model, new_model) %}
+{#
+  This macro generates a migration plan when replacing models
+  Parameters:
+    - old_model: The model being replaced
+    - new_model: The new model replacing it
+#}
+
+{% set old_relation = ref(old_model) %}
+{% set new_relation = ref(new_model) %}
+
+-- Get columns from both models
+{% set old_columns_query %}
+  SELECT 
+    column_name,
+    data_type,
+    is_nullable,
+    ordinal_position
+  FROM {{ information_schema_columns(old_relation) }}
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set new_columns_query %}
+  SELECT 
+    column_name,
+    data_type,
+    is_nullable,
+    ordinal_position
+  FROM {{ information_schema_columns(new_relation) }}
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set old_columns = run_query(old_columns_query) %}
+{% set new_columns = run_query(new_columns_query) %}
+
+-- Create dictionaries for comparison
+{% set old_cols = {} %}
+{% for col in old_columns %}
+  {% do old_cols.update({col['column_name']: {
+    'data_type': col['data_type'],
+    'is_nullable': col['is_nullable'],
+    'position': col['ordinal_position']
+  }}) %}
+{% endfor %}
+
+{% set new_cols = {} %}
+{% for col in new_columns %}
+  {% do new_cols.update({col['column_name']: {
+    'data_type': col['data_type'],
+    'is_nullable': col['is_nullable'],
+    'position': col['ordinal_position']
+  }}) %}
+{% endfor %}
+
+-- Find downstream models
+{% set downstream_query %}
+  WITH RECURSIVE model_deps AS (
+    -- Base case: the starting model
+    SELECT 
+      n.unique_id,
+      n.name,
+      null as referenced_by,
+      0 as depth
+    FROM {{ graph.nodes }} n
+    WHERE n.name = '{{ old_model }}'
+    
+    UNION ALL
+    
+    -- Recursive case: downstream dependencies
+    SELECT
+      d.unique_id,
+      d.name,
+      m.name as referenced_by,
+      m.depth + 1 as depth
+    FROM model_deps m
+    JOIN {{ graph.edges }} e ON e.source_id = m.unique_id
+    JOIN {{ graph.nodes }} d ON d.unique_id = e.target_id
+    WHERE d.resource_type = 'model'
+  )
+  
+  SELECT
+    name,
+    referenced_by,
+    depth
+  FROM model_deps
+  WHERE depth > 0  -- Skip the starting model
+  ORDER BY depth, name
+{% endset %}
+
+{% set downstream_models = run_query(downstream_query) %}
+
+{% if execute %}
+  {{ log('Migration Plan: ' ~ old_model ~ ' → ' ~ new_model, info=True) }}
+  {{ log('=' * 80, info=True) }}
+  {{ log('', info=True) }}
+  
+  {{ log('## 1. Schema Changes', info=True) }}
+  {{ log('', info=True) }}
+  
+  -- Find columns that exist in both models but have changed
+  {% set changed_columns = [] %}
+  {% for col_name, col_info in old_cols.items() %}
+    {% if col_name in new_cols %}
+      {% set new_info = new_cols[col_name] %}
+      {% if col_info.data_type != new_info.data_type or col_info.is_nullable != new_info.is_nullable %}
+        {% do changed_columns.append({
+          'name': col_name,
+          'old_type': col_info.data_type,
+          'new_type': new_info.data_type,
+          'old_nullable': col_info.is_nullable,
+          'new_nullable': new_info.is_nullable
+        }) %}
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+  
+  -- Find columns in old model that don't exist in new model
+  {% set removed_columns = [] %}
+  {% for col_name in old_cols %}
+    {% if col_name not in new_cols %}
+      {% do removed_columns.append(col_name) %}
+    {% endif %}
+  {% endfor %}
+  
+  -- Find columns in new model that don't exist in old model
+  {% set added_columns = [] %}
+  {% for col_name in new_cols %}
+    {% if col_name not in old_cols %}
+      {% do added_columns.append({
+        'name': col_name,
+        'type': new_cols[col_name].data_type,
+        'nullable': new_cols[col_name].is_nullable
+      }) %}
+    {% endif %}
+  {% endfor %}
+  
+  -- Log schema changes
+  {% if changed_columns or removed_columns or added_columns %}
+    {% if changed_columns %}
+      {{ log('### Changed Columns:', info=True) }}
+      {{ log('', info=True) }}
+      {{ log('| Column | Old Type | New Type | Old Nullable | New Nullable |', info=True) }}
+      {{ log('|--------|----------|----------|--------------|--------------|', info=True) }}
+      {% for col in changed_columns %}
+        {{ log('| ' ~ col.name ~ ' | ' ~ col.old_type ~ ' | ' ~ col.new_type ~ ' | ' ~ col.old_nullable ~ ' | ' ~ col.new_nullable ~ ' |', info=True) }}
+      {% endfor %}
+      {{ log('', info=True) }}
+    {% endif %}
+    
+    {% if removed_columns %}
+      {{ log('### Removed Columns:', info=True) }}
+      {{ log('', info=True) }}
+      {{ log('- ' ~ removed_columns | join('\n- '), info=True) }}
+      {{ log('', info=True) }}
+    {% endif %}
+    
+    {% if added_columns %}
+      {{ log('### Added Columns:', info=True) }}
+      {{ log('', info=True) }}
+      {{ log('| Column | Type | Nullable |', info=True) }}
+      {{ log('|--------|------|----------|', info=True) }}
+      {% for col in added_columns %}
+        {{ log('| ' ~ col.name ~ ' | ' ~ col.type ~ ' | ' ~ col.nullable ~ ' |', info=True) }}
+      {% endfor %}
+      {{ log('', info=True) }}
+    {% endif %}
+  {% else %}
+    {{ log('No schema changes detected. Column names and types are identical.', info=True) }}
+    {{ log('', info=True) }}
+  {% endif %}
+  
+  {{ log('## 2. Impact Analysis', info=True) }}
+  {{ log('', info=True) }}
+  
+  {% if downstream_models %}
+    {{ log('### Downstream Models Affected:', info=True) }}
+    {{ log('', info=True) }}
+    {{ log('| Model | Referenced By | Risk Assessment |', info=True) }}
+    {{ log('|-------|--------------|----------------|', info=True) }}
+    
+    {% for model in downstream_models %}
+      {% set risk_level = 'Low' %}
+      {% if removed_columns %}
+        {% set risk_level = 'High' %}
+      {% elif changed_columns %}
+        {% set risk_level = 'Medium' %}
+      {% endif %}
+      
+      {{ log('| ' ~ model['name'] ~ ' | ' ~ model['referenced_by'] ~ ' | ' ~ risk_level ~ ' |', info=True) }}
+    {% endfor %}
+  {% else %}
+    {{ log('No downstream models will be affected by this change.', info=True) }}
+  {% endif %}
+  
+  {{ log('', info=True) }}
+  {{ log('## 3. Migration Steps', info=True) }}
+  {{ log('', info=True) }}
+  
+  {{ log('```sql', info=True) }}
+  {{ log('-- 1. Create backup of the original model', info=True) }}
+  {{ log('CREATE OR REPLACE TABLE {{ target.schema }}_backup.{{ old_model }} AS', info=True) }}
+  {{ log('SELECT * FROM {{ old_model }};', info=True) }}
+  {{ log('', info=True) }}
+  
+  {{ log('-- 2. Update references to the old model', info=True) }}
+  {{ log('-- Run the replace_model_references.py script:', info=True) }}
+  {{ log('-- python scripts/replace_model_references.py --old-model {{ old_model }} --new-model {{ new_model }}', info=True) }}
+  {{ log('', info=True) }}
+  
+  {{ log('-- 3. Test downstream models after replacement', info=True) }}
+  {% if downstream_models %}
+    {% for model in downstream_models %}
+      {{ log('-- dbt run --models {{ model["name"] }}', info=True) }}
+    {% endfor %}
+  {% else %}
+    {{ log('-- No downstream models to test', info=True) }}
+  {% endif %}
+  {{ log('```', info=True) }}
+  
+  {{ log('', info=True) }}
+  {{ log('## 4. Rollback Plan', info=True) }}
+  {{ log('', info=True) }}
+  
+  {{ log('```sql', info=True) }}
+  {{ log('-- If migration fails, restore references to the original model', info=True) }}
+  {{ log('-- python scripts/replace_model_references.py --old-model {{ new_model }} --new-model {{ old_model }}', info=True) }}
+  {{ log('```', info=True) }}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 10. A/B MODEL TESTING
+{% macro ab_test_models(model_a, model_b, metrics=['row_count', 'performance', 'data_quality']) %}
+{#
+  This macro performs A/B testing between two model variants
+  Parameters:
+    - model_a: First model variant
+    - model_b: Second model variant
+    - metrics: Metrics to compare
+#}
+
+{% set relation_a = ref(model_a) %}
+{% set relation_b = ref(model_b) %}
+
+-- 1. Row count comparison
+{% if 'row_count' in metrics %}
+  {% set count_a_query %}
+    SELECT COUNT(*) FROM {{ relation_a }}
+  {% endset %}
+  
+  {% set count_b_query %}
+    SELECT COUNT(*) FROM {{ relation_b }}
+  {% endset %}
+  
+  {% set count_a = run_query(count_a_query).columns[0][0] %}
+  {% set count_b = run_query(count_b_query).columns[0][0] %}
+  
+  WITH row_count_comparison AS (
+    SELECT
+      '{{ model_a }}' as model_a,
+      '{{ model_b }}' as model_b,
+      {{ count_a }} as model_a_rows,
+      {{ count_b }} as model_b_rows,
+      {{ count_b }} - {{ count_a }} as row_diff,
+      ROUND(({{ count_b }} - {{ count_a }}) * 100.0 / NULLIF({{ count_a }}, 0), 2) as pct_diff
+  )
+  
+  SELECT * FROM row_count_comparison
+{% endif %}
+
+-- 2. Performance comparison
+{% if 'performance' in metrics %}
+  {% for i in range(3) %}  -- Run multiple times for better comparison
+    {% set start_time_a = modules.datetime.datetime.now() %}
+    {% set result_a = run_query('SELECT * FROM ' ~ relation_a ~ ' LIMIT 1000') %}
+    {% set end_time_a = modules.datetime.datetime.now() %}
+    {% set duration_a = (end_time_a - start_time_a).total_seconds() %}
+    
+    {% set start_time_b = modules.datetime.datetime.now() %}
+    {% set result_b = run_query('SELECT * FROM ' ~ relation_b ~ ' LIMIT 1000') %}
+    {% set end_time_b = modules.datetime.datetime.now() %}
+    {% set duration_b = (end_time_b - start_time_b).total_seconds() %}
+    
+    {% if execute %}
+      {{ log('Performance test run ' ~ (i+1) ~ ':', info=True) }}
+      {{ log('  - ' ~ model_a ~ ': ' ~ duration_a ~ ' seconds', info=True) }}
+      {{ log('  - ' ~ model_b ~ ': ' ~ duration_b ~ ' seconds', info=True) }}
+      {{ log('  - Difference: ' ~ (duration_b - duration_a) ~ ' seconds', info=True) }}
+      {{ log('  - Pct diff: ' ~ ((duration_b - duration_a) / duration_a * 100) | round(2) ~ '%', info=True) }}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+-- 3. Data quality comparison
+{% if 'data_quality' in metrics %}
+  -- Get common columns between the two models
+  {% set columns_a_query %}
+    SELECT column_name, data_type
+    FROM {{ information_schema_columns(relation_a) }}
+  {% endset %}
+  
+  {% set columns_b_query %}
+    SELECT column_name, data_type
+    FROM {{ information_schema_columns(relation_b) }}
+  {% endset %}
+  
+  {% set columns_a = run_query(columns_a_query) %}
+  {% set columns_b = run_query(columns_b_query) %}
+  
+  -- Convert to dictionaries
+  {% set cols_a = {} %}
+  {% for col in columns_a %}
+    {% do cols_a.update({col['column_name']: col['data_type']}) %}
+  {% endfor %}
+  
+  {% set cols_b = {} %}
+  {% for col in columns_b %}
+    {% do cols_b.update({col['column_name']: col['data_type']}) %}
+  {% endfor %}
+  
+  -- Find common columns with matching types
+  {% set common_columns = [] %}
+  {% for col, type in cols_a.items() %}
+    {% if col in cols_b and cols_b[col] == type %}
+      {% do common_columns.append(col) %}
+    {% endif %}
+  {% endfor %}
+  
+  -- For each common column, compare null counts and distinct values
+  {% for column in common_columns %}
+    {% set null_a_query %}
+      SELECT 
+        SUM(CASE WHEN {{ column }} IS NULL THEN 1 ELSE 0 END) as null_count,
+        COUNT(DISTINCT {{ column }}) as distinct_count
+      FROM {{ relation_a }}
+    {% endset %}
+    
+    {% set null_b_query %}
+      SELECT 
+        SUM(CASE WHEN {{ column }} IS NULL THEN 1 ELSE 0 END) as null_count,
+        COUNT(DISTINCT {{ column }}) as distinct_count
+      FROM {{ relation_b }}
+    {% endset %}
+    
+    {% set null_a = run_query(null_a_query) %}
+    {% set null_b = run_query(null_b_query) %}
+    
+    {% if execute %}
+      {{ log('Data quality comparison for column ' ~ column ~ ':', info=True) }}
+      {{ log('  - ' ~ model_a ~ ': ' ~ null_a.columns[0][0] ~ ' nulls, ' ~ null_a.columns[1][0] ~ ' distinct values', info=True) }}
+      {{ log('  - ' ~ model_b ~ ': ' ~ null_b.columns[0][0] ~ ' nulls, ' ~ null_b.columns[1][0] ~ ' distinct values', info=True) }}
+    {% endif %}
+    
+    WITH a_stats AS (
+      SELECT
+        '{{ column }}' as column_name,
+        {{ null_a.columns[0][0] }} as null_count_a,
+        {{ null_a.columns[1][0] }} as distinct_count_a
+    ),
+    
+    b_stats AS (
+      SELECT
+        '{{ column }}' as column_name,
+        {{ null_b.columns[0][0] }} as null_count_b,
+        {{ null_b.columns[1][0] }} as distinct_count_b
+    ),
+    
+    comparison AS (
+      SELECT
+        a_stats.column_name,
+        null_count_a,
+        null_count_b,
+        null_count_b - null_count_a as null_diff,
+        distinct_count_a,
+        distinct_count_b,
+        distinct_count_b - distinct_count_a as distinct_diff
+      FROM a_stats, b_stats
+      WHERE a_stats.column_name = b_stats.column_name
+    )
+    
+    SELECT * FROM comparison
+    
+    {% if not loop.last %}UNION ALL{% endif %}
+  {% endfor %}
+{% endif %}
+
+{% endmacro %}
