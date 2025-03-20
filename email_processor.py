@@ -13,9 +13,17 @@ import re
 from datetime import datetime
 from pathlib import Path
 import shutil
+
+# Google OAuth imports
+import json
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from gspread_dataframe import set_with_dataframe
+from gspread.client import Client
+from gspread.auth import AuthorizedUser
 
 # Set up logging
 logging.basicConfig(
@@ -39,6 +47,9 @@ class WorkdayEmailProcessor:
         self.temp_dir = Path(tempfile.mkdtemp())
         logger.info(f"Created temporary directory: {self.temp_dir}")
         
+        # Initialize Google OAuth authentication
+        self._init_google_auth()
+        
         # Initialize Google Sheets connection
         self._init_gsheets()
         
@@ -56,23 +67,62 @@ class WorkdayEmailProcessor:
             logger.error(f"Error loading configuration: {e}")
             raise
     
-    def _init_gsheets(self):
-        """Initialize Google Sheets API connection."""
+    def _init_google_auth(self):
+        """Initialize Google OAuth authentication."""
         try:
             # Define the scope
-            scope = ['https://spreadsheets.google.com/feeds',
+            SCOPES = ['https://www.googleapis.com/auth/spreadsheets',
                      'https://www.googleapis.com/auth/drive']
             
-            # Get credentials from service account file
-            credentials = ServiceAccountCredentials.from_json_keyfile_name(
-                self.config['google_sheets']['credentials_file'], 
-                scope
+            # Path to token file (for storing authenticated credentials)
+            token_file = self.config['google_sheets'].get('token_file', 'token.json')
+            credentials_file = self.config['google_sheets']['oauth_credentials_file']
+            
+            creds = None
+            # Check if token file exists
+            if os.path.exists(token_file):
+                creds = Credentials.from_authorized_user_info(
+                    json.load(open(token_file)), SCOPES)
+            
+            # If no valid credentials, run the authentication flow
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        credentials_file, SCOPES)
+                    creds = flow.run_local_server(port=0)
+                
+                # Save the credentials for future runs
+                with open(token_file, 'w') as token:
+                    token.write(creds.to_json())
+            
+            self.google_creds = creds
+            logger.info("Successfully initialized Google OAuth authentication")
+        except Exception as e:
+            logger.error(f"Error initializing Google OAuth: {e}")
+            raise
+    
+    def _init_gsheets(self):
+        """Initialize Google Sheets API connection using OAuth."""
+        try:
+            # Use the previously initialized credentials
+            creds = self.google_creds
+            
+            # Create gspread client with authorized user
+            authorized_user = AuthorizedUser(
+                access_token=creds.token,
+                refresh_token=creds.refresh_token,
+                id_token=creds.id_token,
+                token_uri=creds.token_uri,
+                client_id=creds.client_id,
+                client_secret=creds.client_secret,
+                scopes=creds.scopes,
+                expiry=creds.expiry.isoformat() if creds.expiry else None
             )
             
-            # Authorize with Google
-            self.gc = gspread.authorize(credentials)
-            self.google_creds = credentials
-            logger.info("Successfully authenticated with Google Sheets API")
+            self.gc = Client(auth=authorized_user)
+            logger.info("Successfully authenticated with Google Sheets API via OAuth")
         except Exception as e:
             logger.error(f"Error connecting to Google Sheets: {e}")
             raise
@@ -96,13 +146,7 @@ class WorkdayEmailProcessor:
                 logger.info(f"Initialized local archive directory: {archive_dir}")
                 
             elif archive_method == 'google_drive':
-                # Drive will be initialized when needed using the same credentials
-                # as Google Sheets (already set up in _init_gsheets)
-                
-                # Get or create the parent folder in Google Drive
-                from googleapiclient.discovery import build
-                from googleapiclient.http import MediaFileUpload
-                
+                # Use the OAuth credentials for Drive as well
                 drive_service = build('drive', 'v3', credentials=self.google_creds)
                 
                 # Check if the parent folder exists
