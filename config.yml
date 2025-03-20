@@ -1,4 +1,4 @@
-# Configuration for Workday Email Processor
+# Configuration for Workday Email Processor with OAuth Authentication
 # Save as workday_config.yml
 
 # Email settings
@@ -11,12 +11,13 @@ email:
   mark_as_processed: true  # Mark emails as read after processing
   processed_folder: "Processed"  # Move to this folder after processing
 
-# Google Sheets settings
+# Google Sheets settings with OAuth authentication
 google_sheets:
-  credentials_file: "service-account-credentials.json"  # Path to your service account JSON file
-  loa_sheet_id: "your_loa_sheet_id_here"  # The ID from the Google Sheet URL
+  oauth_credentials_file: "/path/to/oauth_credentials.json"  # Downloaded from Google Cloud Console
+  token_file: "/path/to/token.json"  # Where OAuth token will be stored
+  loa_sheet_id: "your_loa_sheet_id_here"  # Get from the URL of your LOA sheet
   loa_sheet_name: "Sheet1"  # The name of the worksheet
-  to_sheet_id: "your_to_sheet_id_here"  # The ID from the Google Sheet URL
+  to_sheet_id: "your_to_sheet_id_here"  # Get from the URL of your TO sheet
   to_sheet_name: "Sheet1"  # The name of the worksheet
 
 # Column mapping if Workday export columns need to be renamed
@@ -38,7 +39,7 @@ archive:
   # Settings for local archiving
   local_path: "/path/to/archive/directory"  # Local directory path
   
-  # Settings for Google Drive archiving
+  # Settings for Google Drive archiving (uses the same OAuth credentials)
   drive_folder_name: "Workday Risk Data Archive"  # Name of the folder in Google Drive
   
 # Notification settings (optional)
