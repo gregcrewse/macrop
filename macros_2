@@ -1,0 +1,669 @@
+-- 1. COLUMN LINEAGE TRACKER
+{% macro trace_column_lineage(model_name, column_name) %}
+{#
+  This macro traces the lineage of a specific column through upstream models
+  Parameters:
+    - model_name: The model containing the column
+    - column_name: The column to trace
+#}
+
+{% set model_refs_query %}
+  WITH RECURSIVE model_lineage AS (
+    -- Base case: the starting model
+    SELECT 
+      n.unique_id,
+      n.name,
+      null as referenced_by,
+      0 as depth
+    FROM {{ graph.nodes }} n
+    WHERE n.name = '{{ model_name }}'
+    
+    UNION ALL
+    
+    -- Recursive case: all upstream models
+    SELECT
+      u.unique_id,
+      u.name,
+      l.name as referenced_by,
+      l.depth + 1 as depth
+    FROM model_lineage l
+    JOIN {{ graph.edges }} e ON e.target_id = l.unique_id
+    JOIN {{ graph.nodes }} u ON u.unique_id = e.source_id
+    WHERE u.resource_type = 'model'
+  )
+  
+  SELECT
+    unique_id,
+    name,
+    referenced_by,
+    depth
+  FROM model_lineage
+  ORDER BY depth ASC, name
+{% endset %}
+
+{% set model_refs = run_query(model_refs_query) %}
+
+{% if execute %}
+  {{ log('Tracing lineage for column "' ~ column_name ~ '" in model "' ~ model_name ~ '":', info=True) }}
+  
+  {% for model_ref in model_refs %}
+    {% set current_model = model_ref['name'] %}
+    {% set depth = model_ref['depth'] %}
+    {% set referenced_by = model_ref['referenced_by'] %}
+    
+    {% set model_sql_query %}
+      SELECT compiled_sql 
+      FROM {{ graph.nodes }}
+      WHERE name = '{{ current_model }}'
+    {% endset %}
+    
+    {% set model_sql = run_query(model_sql_query).columns[0][0] %}
+    
+    {% if model_sql and model_sql is string %}
+      {% set indentation = '  ' * depth %}
+      {% if column_name | lower in model_sql | lower %}
+        {{ log(indentation ~ '- ' ~ current_model ~ (referenced_by is not none and ' (referenced by ' ~ referenced_by ~ ')' or ''), info=True) }}
+        
+        -- Extract column references in SELECT statements
+        {% set column_references = [] %}
+        {% set select_pattern = r'SELECT.*?FROM'|regex_search(model_sql, ignorecase=True) %}
+        {% if select_pattern %}
+          {% set select_clause = select_pattern[0] %}
+          {% if column_name | lower in select_clause | lower %}
+            -- Found the column in SELECT clause, look for its definition
+            {{ log(indentation ~ '  Column "' ~ column_name ~ '" found in SELECT clause', info=True) }}
+            
+            -- Try to extract definition (basic case)
+            {% set column_def_pattern = r'(\w+\.\w+|\w+)\s+(?:AS\s+)?' ~ column_name %}
+            {% set column_def_match = column_def_pattern|regex_search(select_clause, ignorecase=True) %}
+            {% if column_def_match %}
+              {{ log(indentation ~ '  Possible definition: ' ~ column_def_match[0], info=True) }}
+            {% endif %}
+          {% endif %}
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 2. MODEL DEPENDENCY VISUALIZER
+{% macro visualize_model_dependencies(model_name, max_depth=3) %}
+{#
+  This macro generates a Mermaid diagram of model dependencies
+  Parameters:
+    - model_name: The model to visualize dependencies for
+    - max_depth: Maximum depth of upstream dependencies to show
+#}
+
+{% set dependencies_query %}
+  WITH RECURSIVE model_deps AS (
+    -- Base case: the starting model
+    SELECT 
+      n.unique_id,
+      n.name,
+      n.resource_type,
+      0 as depth
+    FROM {{ graph.nodes }} n
+    WHERE n.name = '{{ model_name }}'
+    
+    UNION ALL
+    
+    -- Recursive case: upstream dependencies
+    SELECT
+      u.unique_id,
+      u.name,
+      u.resource_type,
+      d.depth + 1 as depth
+    FROM model_deps d
+    JOIN {{ graph.edges }} e ON e.target_id = d.unique_id
+    JOIN {{ graph.nodes }} u ON u.unique_id = e.source_id
+    WHERE d.depth < {{ max_depth }}
+  )
+  
+  SELECT DISTINCT
+    unique_id,
+    name,
+    resource_type,
+    depth
+  FROM model_deps
+  ORDER BY depth ASC, name
+{% endset %}
+
+{% set dependencies = run_query(dependencies_query) %}
+
+{% set edges_query %}
+  WITH model_deps AS (
+    SELECT 
+      unique_id,
+      name
+    FROM ({{ dependencies_query }})
+  )
+  
+  SELECT DISTINCT
+    source.name as source_name,
+    target.name as target_name
+  FROM {{ graph.edges }} e
+  JOIN model_deps source ON source.unique_id = e.source_id
+  JOIN model_deps target ON target.unique_id = e.target_id
+  ORDER BY source_name, target_name
+{% endset %}
+
+{% set edges = run_query(edges_query) %}
+
+{% if execute %}
+  {{ log('graph TD', info=True) }}
+  
+  -- Define nodes with styling
+  {% for dep in dependencies %}
+    {% set node_name = dep['name'] %}
+    {% set resource_type = dep['resource_type'] %}
+    {% set depth = dep['depth'] %}
+    
+    {% set node_style = '' %}
+    {% if node_name == model_name %}
+      {% set node_style = ':::focus' %}
+    {% elif resource_type == 'model' %}
+      {% set node_style = ':::model' %}
+    {% elif resource_type == 'source' %}
+      {% set node_style = ':::source' %}
+    {% elif resource_type == 'seed' %}
+      {% set node_style = ':::seed' %}
+    {% endif %}
+    
+    {{ log('  ' ~ node_name ~ node_style, info=True) }}
+  {% endfor %}
+  
+  -- Define edges
+  {% for edge in edges %}
+    {{ log('  ' ~ edge['source_name'] ~ ' --> ' ~ edge['target_name'], info=True) }}
+  {% endfor %}
+  
+  -- Define styles
+  {{ log('  classDef focus fill:#f96,stroke:#333,stroke-width:2px;', info=True) }}
+  {{ log('  classDef model fill:#bbf,stroke:#33f,stroke-width:1px;', info=True) }}
+  {{ log('  classDef source fill:#bfb,stroke:#3f3,stroke-width:1px;', info=True) }}
+  {{ log('  classDef seed fill:#fbf,stroke:#f3f,stroke-width:1px;', info=True) }}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 3. DATA QUALITY MONITORING MACRO
+{% macro monitor_data_quality(model_name, tests_to_run=['not_null', 'unique', 'relationships'], columns=none) %}
+{#
+  This macro generates data quality tests for specified columns
+  Parameters:
+    - model_name: The model to generate tests for
+    - tests_to_run: List of test types to generate
+    - columns: Optional list of columns to test (defaults to all)
+#}
+
+{% set relation = ref(model_name) %}
+
+{% if columns is none %}
+  {% set columns_query %}
+    SELECT column_name
+    FROM {{ information_schema_columns(relation) }}
+    ORDER BY ordinal_position
+  {% endset %}
+  
+  {% set columns = run_query(columns_query).columns[0].values() %}
+{% endif %}
+
+{% if execute %}
+  {{ log('# Data Quality Tests for model: ' ~ model_name, info=True) }}
+  
+  {% for column in columns %}
+    {{ log('version: 2', info=True) }}
+    {{ log('', info=True) }}
+    {{ log('models:', info=True) }}
+    {{ log('  - name: ' ~ model_name, info=True) }}
+    {{ log('    columns:', info=True) }}
+    {{ log('      - name: ' ~ column, info=True) }}
+    {{ log('        tests:', info=True) }}
+    
+    {% if 'not_null' in tests_to_run %}
+      {{ log('          - not_null', info=True) }}
+    {% endif %}
+    
+    {% if 'unique' in tests_to_run and loop.index == 1 %}
+      -- Assume first column might be a primary key
+      {{ log('          - unique', info=True) }}
+    {% endif %}
+    
+    {% if 'relationships' in tests_to_run and column | lower is contains('_id') %}
+      -- For columns that look like foreign keys
+      {{ log('          - relationships:', info=True) }}
+      {{ log('              to: ref(\'' ~ column | replace('_id', '') ~ '\')', info=True) }}
+      {{ log('              field: id', info=True) }}
+    {% endif %}
+    
+    {% if 'accepted_values' in tests_to_run %}
+      -- Get possible values for the column (limited to prevent huge lists)
+      {% set values_query %}
+        SELECT DISTINCT {{ column }}
+        FROM {{ relation }}
+        WHERE {{ column }} IS NOT NULL
+        LIMIT 10
+      {% endset %}
+      
+      {% set values = run_query(values_query).columns[0].values() %}
+      {% if values|length > 0 and values|length < 10 %}
+        {{ log('          - accepted_values:', info=True) }}
+        {{ log('              values: [' ~ values|join(', ') ~ ']', info=True) }}
+      {% endif %}
+    {% endif %}
+    
+    {{ log('', info=True) }}
+  {% endfor %}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 4. INCREMENTAL TESTING MACRO
+{% macro test_incremental_load(model_name, date_column, lookback_days=7) %}
+{#
+  This macro tests incremental loading for a model
+  Parameters:
+    - model_name: The model to test incremental loading for
+    - date_column: The column used for incremental filtering
+    - lookback_days: Number of days to test
+#}
+
+-- Get the max date in the model
+{% set max_date_query %}
+  SELECT MAX({{ date_column }}) as max_date
+  FROM {{ ref(model_name) }}
+{% endset %}
+
+{% set max_date = run_query(max_date_query).columns[0][0] %}
+
+-- Create a CTE for each day in the lookback period
+WITH 
+{% for i in range(lookback_days) %}
+  day_{{ i }} AS (
+    SELECT 
+      '{{ model_name }}' as model_name,
+      DATEADD(day, -{{ i }}, '{{ max_date }}') as load_date,
+      COUNT(*) as record_count
+    FROM {{ ref(model_name) }}
+    WHERE {{ date_column }} <= DATEADD(day, -{{ i }}, '{{ max_date }}')
+  ){% if not loop.last %},{% endif %}
+{% endfor %}
+
+-- Union all day CTEs
+SELECT * FROM 
+{% for i in range(lookback_days) %}
+  day_{{ i }}{% if not loop.last %} UNION ALL {% endif %}
+{% endfor %}
+ORDER BY load_date DESC
+
+{% endmacro %}
+
+
+-- 5. SCHEMA CHANGE DETECTOR
+{% macro detect_schema_changes(model_name, compare_env='prod') %}
+{#
+  This macro detects schema changes between environments
+  Parameters:
+    - model_name: The model to check for schema changes
+    - compare_env: The environment to compare with (default: prod)
+#}
+
+-- Get current environment schema
+{% set current_schema_query %}
+  SELECT 
+    column_name,
+    data_type,
+    character_maximum_length,
+    is_nullable
+  FROM {{ information_schema_columns(ref(model_name)) }}
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set current_schema = run_query(current_schema_query) %}
+
+-- Get comparison environment schema reference
+{% set prod_schema_query %}
+  SELECT 
+    column_name,
+    data_type,
+    character_maximum_length,
+    is_nullable
+  FROM {{ env_var(compare_env) }}.information_schema.columns
+  WHERE table_name = '{{ model_name }}'
+  ORDER BY ordinal_position
+{% endset %}
+
+{% if execute %}
+  -- Try to run the comparison query, but it might fail if env doesn't exist
+  {% try %}
+    {% set prod_schema = run_query(prod_schema_query) %}
+    
+    -- Convert result sets to dictionaries for comparison
+    {% set current_columns = {} %}
+    {% for row in current_schema %}
+      {% do current_columns.update({row['column_name']: {
+        'data_type': row['data_type'],
+        'character_maximum_length': row['character_maximum_length'],
+        'is_nullable': row['is_nullable']
+      }}) %}
+    {% endfor %}
+    
+    {% set prod_columns = {} %}
+    {% for row in prod_schema %}
+      {% do prod_columns.update({row['column_name']: {
+        'data_type': row['data_type'],
+        'character_maximum_length': row['character_maximum_length'],
+        'is_nullable': row['is_nullable']
+      }}) %}
+    {% endfor %}
+    
+    -- Find columns in current but not in prod (added)
+    {% set added_columns = [] %}
+    {% for col in current_columns.keys() %}
+      {% if col not in prod_columns %}
+        {% do added_columns.append(col) %}
+      {% endif %}
+    {% endfor %}
+    
+    -- Find columns in prod but not in current (removed)
+    {% set removed_columns = [] %}
+    {% for col in prod_columns.keys() %}
+      {% if col not in current_columns %}
+        {% do removed_columns.append(col) %}
+      {% endif %}
+    {% endfor %}
+    
+    -- Find columns with type changes
+    {% set changed_columns = [] %}
+    {% for col in current_columns.keys() %}
+      {% if col in prod_columns %}
+        {% set current = current_columns[col] %}
+        {% set prod = prod_columns[col] %}
+        {% if current.data_type != prod.data_type or 
+               current.character_maximum_length != prod.character_maximum_length or
+               current.is_nullable != prod.is_nullable %}
+          {% do changed_columns.append({
+            'name': col,
+            'current_type': current.data_type,
+            'prod_type': prod.data_type,
+            'current_length': current.character_maximum_length,
+            'prod_length': prod.character_maximum_length,
+            'current_nullable': current.is_nullable,
+            'prod_nullable': prod.is_nullable
+          }) %}
+        {% endif %}
+      {% endif %}
+    {% endfor %}
+    
+    -- Log the results
+    {{ log('Schema change detection for model "' ~ model_name ~ '" comparing with ' ~ compare_env ~ ':', info=True) }}
+    
+    {% if added_columns %}
+      {{ log('Added columns:', info=True) }}
+      {% for col in added_columns %}
+        {{ log('  - ' ~ col ~ ' (' ~ current_columns[col].data_type ~ ')', info=True) }}
+      {% endfor %}
+    {% else %}
+      {{ log('No columns added.', info=True) }}
+    {% endif %}
+    
+    {% if removed_columns %}
+      {{ log('Removed columns:', info=True) }}
+      {% for col in removed_columns %}
+        {{ log('  - ' ~ col ~ ' (' ~ prod_columns[col].data_type ~ ')', info=True) }}
+      {% endfor %}
+    {% else %}
+      {{ log('No columns removed.', info=True) }}
+    {% endif %}
+    
+    {% if changed_columns %}
+      {{ log('Changed columns:', info=True) }}
+      {% for col in changed_columns %}
+        {% set changes = [] %}
+        {% if col.current_type != col.prod_type %}
+          {% do changes.append('type: ' ~ col.prod_type ~ ' → ' ~ col.current_type) %}
+        {% endif %}
+        {% if col.current_length != col.prod_length %}
+          {% do changes.append('length: ' ~ col.prod_length ~ ' → ' ~ col.current_length) %}
+        {% endif %}
+        {% if col.current_nullable != col.prod_nullable %}
+          {% do changes.append('nullable: ' ~ col.prod_nullable ~ ' → ' ~ col.current_nullable) %}
+        {% endif %}
+        {{ log('  - ' ~ col.name ~ ' (' ~ changes|join(', ') ~ ')', info=True) }}
+      {% endfor %}
+    {% else %}
+      {{ log('No columns changed.', info=True) }}
+    {% endif %}
+    
+  {% endtry %}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 6. ROW COUNT HISTORY TRACKER
+{% macro track_row_counts(models=none) %}
+{#
+  This macro tracks row counts over time for specified models
+  Parameters:
+    - models: Optional list of models to track (defaults to all)
+#}
+
+{% if models is none %}
+  {% set models_query %}
+    SELECT name
+    FROM {{ graph.nodes }}
+    WHERE resource_type = 'model'
+    ORDER BY name
+  {% endset %}
+  
+  {% set models = run_query(models_query).columns[0].values() %}
+{% endif %}
+
+-- Create a query to count rows for each model
+{% for model_name in models %}
+  SELECT 
+    '{{ model_name }}' as model_name,
+    CURRENT_TIMESTAMP() as snapshot_time,
+    COUNT(*) as row_count
+  FROM {{ ref(model_name) }}
+  {% if not loop.last %}UNION ALL{% endif %}
+{% endfor %}
+
+{% endmacro %}
+
+
+-- 7. DOCUMENTATION GENERATOR
+{% macro generate_model_documentation(model_name) %}
+{#
+  This macro generates documentation for a model
+  Parameters:
+    - model_name: The model to generate documentation for
+#}
+
+{% set relation = ref(model_name) %}
+
+-- Get model columns
+{% set columns_query %}
+  SELECT 
+    column_name,
+    data_type,
+    character_maximum_length,
+    is_nullable
+  FROM {{ information_schema_columns(relation) }}
+  ORDER BY ordinal_position
+{% endset %}
+
+{% set columns = run_query(columns_query) %}
+
+-- Get sample data
+{% set sample_query %}
+  SELECT * FROM {{ relation }} LIMIT 5
+{% endset %}
+
+{% set sample_data = run_query(sample_query) %}
+
+-- Get row count
+{% set count_query %}
+  SELECT COUNT(*) as row_count FROM {{ relation }}
+{% endset %}
+
+{% set row_count = run_query(count_query).columns[0][0] %}
+
+-- Get model definition
+{% set model_def_query %}
+  SELECT compiled_sql
+  FROM {{ graph.nodes }}
+  WHERE name = '{{ model_name }}'
+{% endset %}
+
+{% set model_def = run_query(model_def_query).columns[0][0] %}
+
+-- Get model dependencies
+{% set deps_query %}
+  WITH model_deps AS (
+    SELECT 
+      n.unique_id,
+      n.name,
+      n.resource_type
+    FROM {{ graph.nodes }} n
+    WHERE n.name = '{{ model_name }}'
+  )
+  
+  SELECT DISTINCT
+    u.name as dependency_name,
+    u.resource_type as dependency_type
+  FROM model_deps m
+  JOIN {{ graph.edges }} e ON e.target_id = m.unique_id
+  JOIN {{ graph.nodes }} u ON u.unique_id = e.source_id
+  ORDER BY dependency_type, dependency_name
+{% endset %}
+
+{% set dependencies = run_query(deps_query) %}
+
+{% if execute %}
+  {{ log('# ' ~ model_name ~ ' Documentation', info=True) }}
+  {{ log('', info=True) }}
+  {{ log('## Overview', info=True) }}
+  {{ log('', info=True) }}
+  {{ log('This model contains ' ~ row_count ~ ' rows.', info=True) }}
+  {{ log('', info=True) }}
+  {{ log('## Schema', info=True) }}
+  {{ log('', info=True) }}
+  {{ log('| Column | Type | Nullable | Description |', info=True) }}
+  {{ log('|--------|------|----------|-------------|', info=True) }}
+  
+  {% for column in columns %}
+    {% set col_type = column['data_type'] %}
+    {% if column['character_maximum_length'] %}
+      {% set col_type = col_type ~ '(' ~ column['character_maximum_length'] ~ ')' %}
+    {% endif %}
+    {{ log('| ' ~ column['column_name'] ~ ' | ' ~ col_type ~ ' | ' ~ column['is_nullable'] ~ ' | |', info=True) }}
+  {% endfor %}
+  
+  {{ log('', info=True) }}
+  {{ log('## Sample Data', info=True) }}
+  {{ log('', info=True) }}
+  
+  -- Generate markdown table header
+  {% set header = '| ' %}
+  {% set header_sep = '| ' %}
+  {% for column_name in sample_data.column_names %}
+    {% set header = header ~ column_name ~ ' | ' %}
+    {% set header_sep = header_sep ~ '-------- | ' %}
+  {% endfor %}
+  
+  {{ log(header, info=True) }}
+  {{ log(header_sep, info=True) }}
+  
+  -- Generate sample data rows
+  {% if sample_data.rows %}
+    {% for row in sample_data.rows %}
+      {% set row_str = '| ' %}
+      {% for i in range(sample_data.column_names|length) %}
+        {% set value = row[i] %}
+        {% if value is none %}
+          {% set value = 'NULL' %}
+        {% endif %}
+        {% set row_str = row_str ~ value ~ ' | ' %}
+      {% endfor %}
+      {{ log(row_str, info=True) }}
+    {% endfor %}
+  {% endif %}
+  
+  {{ log('', info=True) }}
+  {{ log('## Dependencies', info=True) }}
+  {{ log('', info=True) }}
+  {{ log('This model depends on:', info=True) }}
+  {{ log('', info=True) }}
+  
+  {% for dep in dependencies %}
+    {{ log('- ' ~ dep['dependency_type'] ~ ': ' ~ dep['dependency_name'], info=True) }}
+  {% endfor %}
+  
+  {{ log('', info=True) }}
+  {{ log('## Definition', info=True) }}
+  {{ log('', info=True) }}
+  {{ log('```sql', info=True) }}
+  {{ log(model_def, info=True) }}
+  {{ log('```', info=True) }}
+{% endif %}
+
+{% endmacro %}
+
+
+-- 8. PERFORMANCE MONITORING MACRO
+{% macro monitor_model_performance(model_name, runs=5) %}
+{#
+  This macro monitors model build performance
+  Parameters:
+    - model_name: The model to monitor
+    - runs: Number of test runs to perform
+#}
+
+-- Get the model's SQL definition
+{% set model_sql_query %}
+  SELECT compiled_sql
+  FROM {{ graph.nodes }}
+  WHERE name = '{{ model_name }}'
+{% endset %}
+
+{% set model_sql = run_query(model_sql_query).columns[0][0] %}
+
+-- Add EXPLAIN ANALYZE to the query
+{% set explain_query %}
+  EXPLAIN ANALYZE
+  {{ model_sql }}
+{% endset %}
+
+{% if execute %}
+  {{ log('Performance analysis for model "' ~ model_name ~ '":', info=True) }}
+  
+  {% for i in range(runs) %}
+    {{ log('Run ' ~ i+1 ~ '/' ~ runs ~ ':', info=True) }}
+    
+    {% try %}
+      {% set start_time = modules.datetime.datetime.now() %}
+      {% set result = run_query(explain_query) %}
+      {% set end_time = modules.datetime.datetime.now() %}
+      {% set duration = (end_time - start_time).total_seconds() %}
+      
+      {{ log('Duration: ' ~ duration ~ ' seconds', info=True) }}
+      
+      -- Display the execution plan
+      {% for row in result %}
+        {{ log(row[0], info=True) }}
+      {% endfor %}
+    {% endtry %}
+    
+    {{ log('', info=True) }}
+  {% endfor %}
+{% endif %}
+
+{% endmacro %}
